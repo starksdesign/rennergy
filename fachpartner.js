@@ -2,14 +2,10 @@
   // ======================================================
   //  Rennergy Map + Finsweet DOM-Safe (Außendienst + Partner)
   //
-  //  Fixes in dieser Version:
-  //  1) Doppelte Fachpartner:
-  //     - Query wird auf einen Root-Container begrenzt (Wrapper)
-  //     - Dedupe über Webflow data-wf-item-id (wenn vorhanden)
-  //
-  //  2) Scroll nach Marker-Klick:
-  //     - scrollPartnerIntoViewAsync wartet, bis Modal/List sichtbar ist
-  //     - scrollt gezielt im .search_results_wrapper
+  //  Root-Scope: NUR innerhalb .search_results_wrapper
+  //  Fixes:
+  //  - Doppelte Partner: dedupe via data-wf-item-id (fallback key)
+  //  - Scroll nach Marker-Klick: wartet bis Modal/List sichtbar ist
   //
   //  Debug: localStorage.setItem("rennergy_map_debug","1")
   // ======================================================
@@ -34,16 +30,14 @@
     const SEL = {
       mapContainerId: 'map',
 
+      // ROOT SCOPE
+      root: '.search_results_wrapper',
+
       // Außendienst (outer list)
-      aussendienstListWrapper: '.aussendienst-karte-list-wrapper',
       aussendienstItem: '.aussendienst-karte-item-wrapper',
 
       // Fachpartner (nested list items)
       partnerItem: '.fachpartner-karte-item-wrapper',
-
-      // Sidebar / Scrollcontainer (wir nehmen den ersten Treffer)
-      sidebar:
-        '.search_results_wrapper, .search-results_wrapper, .search_results, .search-results, .aussendienst-karte-list-wrapper, .fachpartner-karte-list-wrapper',
 
       // UI
       zoomIn: '.zoom-controls .zoom-in',
@@ -61,6 +55,10 @@
       searchNone: '.search_none',
       zoomTarget: '.zoom-target'
     };
+
+    function getRoot() {
+      return document.querySelector(SEL.root) || null;
+    }
 
     // ------------------------------------------------------
     //   DEBUG PANEL
@@ -254,10 +252,6 @@
     // ------------------------------------------------------
     //   Sidebar helpers
     // ------------------------------------------------------
-    function getSidebarEl() {
-      return document.querySelector(SEL.sidebar) || null;
-    }
-
     function isElementVisible(el) {
       if (!el) return false;
       const cs = getComputedStyle(el);
@@ -267,7 +261,7 @@
     }
 
     function computeOffset() {
-      const sidebar = getSidebarEl();
+      const sidebar = getRoot();
 
       if (isHorizontalLayout()) {
         const GAP_X = 24;
@@ -621,7 +615,9 @@
     //   Partner UI helpers (hover/active + scroll)
     // ------------------------------------------------------
     function clearPartnerHover() {
-      document.querySelectorAll(SEL.partnerItem).forEach(el => el.classList.remove('is--hover'));
+      const root = getRoot();
+      if (!root) return;
+      root.querySelectorAll(SEL.partnerItem).forEach(el => el.classList.remove('is--hover'));
     }
 
     function highlightPartnerEl(el, hover) {
@@ -635,25 +631,21 @@
     }
 
     function setActivePartnerEl(el) {
-      document.querySelectorAll(SEL.partnerItem).forEach(x => x.classList.remove('is--active'));
+      const root = getRoot();
+      if (!root) return;
+      root.querySelectorAll(SEL.partnerItem).forEach(x => x.classList.remove('is--active'));
       if (el) el.classList.add('is--active');
     }
 
-    function getScrollContainerFor(el) {
-      if (!el) return null;
-
-      // bevorzugt: explizit das Modal-Scroll-Element
-      const modalScroll = document.querySelector('.search_results_wrapper');
-      if (modalScroll) return modalScroll;
-
-      return el.closest(SEL.sidebar) || getSidebarEl();
+    function getScrollContainerFor() {
+      return getRoot(); // hart: nur dieses Element ist der Scroll-Container
     }
 
     function scrollPartnerIntoViewAsync(el, maxMs = 2500) {
       const start = performance.now();
 
       function doScroll() {
-        const wrapper = getScrollContainerFor(el);
+        const wrapper = getScrollContainerFor();
         if (wrapper && isElementVisible(wrapper) && isElementVisible(el)) {
           const wrapperRect = wrapper.getBoundingClientRect();
           const elRect = el.getBoundingClientRect();
@@ -929,8 +921,6 @@
       const el = partnerElByIndex.get(cardIndex);
       if (el) {
         setActivePartnerEl(el);
-
-        // WICHTIG: asynchron warten bis Modal/Liste sichtbar ist
         scrollPartnerIntoViewAsync(el, 3000);
       }
 
@@ -1005,7 +995,10 @@
     //   Gruppensichtbarkeit: Außendienst nur zeigen, wenn Partner sichtbar
     // ------------------------------------------------------
     function updateAussendienstVisibility() {
-      const adItems = document.querySelectorAll(SEL.aussendienstItem);
+      const root = getRoot();
+      if (!root) return;
+
+      const adItems = root.querySelectorAll(SEL.aussendienstItem);
       adItems.forEach(ad => {
         const partners = ad.querySelectorAll(SEL.partnerItem);
         if (!partners.length) {
@@ -1028,7 +1021,8 @@
       isFilteredByPlz = hasQ;
       updateSearchResetVisibility();
 
-      const cards = Array.from(document.querySelectorAll(SEL.partnerItem));
+      const root = getRoot();
+      const cards = root ? Array.from(root.querySelectorAll(SEL.partnerItem)) : [];
 
       function applyCardsVisibility(allowedSetOrNull) {
         isApplyingDom = true;
@@ -1191,7 +1185,10 @@
 
     function setupZoomTargets() {
       const bind = () => {
-        const targets = document.querySelectorAll(SEL.zoomTarget);
+        const root = getRoot();
+        if (!root) return;
+
+        const targets = root.querySelectorAll(SEL.zoomTarget);
         targets.forEach(target => {
           if (target.dataset._rennergyBound === '1') return;
           target.dataset._rennergyBound = '1';
@@ -1218,7 +1215,10 @@
 
     function setupCardHoverHighlight() {
       const bind = () => {
-        const cards = document.querySelectorAll(SEL.partnerItem);
+        const root = getRoot();
+        if (!root) return;
+
+        const cards = root.querySelectorAll(SEL.partnerItem);
         cards.forEach(card => {
           if (card.dataset._rennergyHover === '1') return;
           card.dataset._rennergyHover = '1';
@@ -1264,7 +1264,7 @@
     }
 
     // ------------------------------------------------------
-    //   Warten bis Finsweet "stabil" ist
+    //   Warten bis Root "stabil" ist
     // ------------------------------------------------------
     async function waitForStablePartners({ timeoutMs = 22000, stableMs = 800 } = {}) {
       const start = Date.now();
@@ -1272,8 +1272,8 @@
       let lastChange = Date.now();
 
       while (Date.now() - start < timeoutMs) {
-        const root = document.querySelector(SEL.aussendienstListWrapper) || document.querySelector('.search_results_wrapper') || document.body;
-        const count = root.querySelectorAll(SEL.partnerItem).length;
+        const root = getRoot();
+        const count = root ? root.querySelectorAll(SEL.partnerItem).length : 0;
 
         if (count !== lastCount) {
           lastCount = count;
@@ -1302,15 +1302,9 @@
     async function rebuildFromDOM(reason) {
       dbg.log('RebuildFromDOM ->', reason || 'manual');
 
-      const root =
-        document.querySelector(SEL.aussendienstListWrapper) ||
-        document.querySelector('.search_results_wrapper') ||
-        document.body;
-
-      const partnerElsAll = Array.from(root.querySelectorAll(SEL.partnerItem));
-
-      if (!partnerElsAll.length) {
-        dbg.log('❌ Keine Fachpartner-Items gefunden im Root:', root === document.body ? 'document.body' : 'scopedRoot');
+      const root = getRoot();
+      if (!root) {
+        dbg.log('❌ Root nicht gefunden:', SEL.root);
         allGeoData = [];
         geoData = [];
         cardCount = 0;
@@ -1321,23 +1315,33 @@
         return;
       }
 
-      aussendienstEls = Array.from((document.querySelector(SEL.aussendienstListWrapper) || root).querySelectorAll(SEL.aussendienstItem));
+      const partnerElsAll = Array.from(root.querySelectorAll(SEL.partnerItem));
+
+      if (!partnerElsAll.length) {
+        dbg.log('❌ Keine Fachpartner-Items gefunden in Root.');
+        allGeoData = [];
+        geoData = [];
+        cardCount = 0;
+        partnerElByIndex = new Map();
+        addClusterSourceAndLayers();
+        updateResultInfo(currentQuery || null);
+        updateNoResultsState();
+        return;
+      }
+
+      aussendienstEls = Array.from(root.querySelectorAll(SEL.aussendienstItem));
       partnerElByIndex = new Map();
 
-      // Dedupe: Webflow item id (wenn vorhanden)
       const seen = new Set();
-
       const out = [];
 
       for (let i = 0; i < partnerElsAll.length; i++) {
         const item = partnerElsAll[i];
 
-        // Webflow CMS dyn item id (häufig an .w-dyn-item)
         const dynItem = item.closest('.w-dyn-item');
         const wfId = dynItem ? dynItem.getAttribute('data-wf-item-id') : null;
 
-        // Fallback key (falls keine wfId existiert)
-        const fallbackKey = (wfId || '') + '|' +
+        const fallbackKey =
           (item.querySelector('.fachpartner_zip')?.textContent?.trim() || '') + '|' +
           (item.querySelector('.fachpartner_city')?.textContent?.trim() || '') + '|' +
           (item.querySelector('h3, h4, .g_content_title')?.textContent?.trim() || '');
@@ -1390,7 +1394,6 @@
         const title = titleEl ? titleEl.textContent.trim() : 'Fachpartner';
         const link  = linkEl  ? (linkEl.getAttribute('href') || '#') : '#';
 
-        // CardIndex erst NACH Dedupe vergeben (damit es sauber 0..N ist)
         const cardIndex = out.length;
 
         item.dataset.cardIndex = String(cardIndex);
@@ -1420,10 +1423,11 @@
       geoData    = out.slice();
       cardCount  = out.length;
 
-      dbg.log('✅ Partner gesammelt (deduped):', { partnerDOM: partnerElsAll.length, geoItems: out.length });
+      dbg.log('✅ Partner gesammelt (scoped+deduped):', { partnerDOM: partnerElsAll.length, geoItems: out.length });
 
       addClusterSourceAndLayers();
       setGeoFilterByQuery(currentQuery);
+
       updateResultInfo(currentQuery || null);
       updateNoResultsState();
 
@@ -1434,10 +1438,12 @@
     }
 
     // ------------------------------------------------------
-    //   Finsweet ReRender Watcher
+    //   Finsweet ReRender Watcher (nur Root)
     // ------------------------------------------------------
     function setupDomObserver(rebindFns) {
-      const target = document.querySelector(SEL.aussendienstListWrapper) || document.body;
+      const target = getRoot();
+      if (!target) return;
+
       const obs = new MutationObserver(() => {
         if (isApplyingDom) return;
         clearTimeout(rerenderTO);
@@ -1452,7 +1458,7 @@
       });
 
       obs.observe(target, { childList: true, subtree: true });
-      dbg.log('👀 MutationObserver aktiv auf:', target === document.body ? 'document.body' : SEL.aussendienstListWrapper);
+      dbg.log('👀 MutationObserver aktiv auf Root:', SEL.root);
     }
 
     // ------------------------------------------------------
