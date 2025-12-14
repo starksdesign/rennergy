@@ -6,9 +6,8 @@
   //  - überlebt Finsweet Re-Renders (MutationObserver + Debounce)
   //  - Debug Panel per localStorage "rennergy_map_debug" = "1"
   //
-  //  UPDATE (dein Punkt 5):
-  //  - Wenn .is--active auf .fachpartner-karte-item-wrapper gesetzt wird (durch Klick),
-  //    zoomt die Map automatisch auf diesen Fachpartner + Marker wird "active".
+  //  UPDATE:
+  //  - Fix: Scroll im Modal -> scrollt den echten Scroll-Container zuverlässig
   // ======================================================
 
   if (!window.mapboxgl) {
@@ -29,7 +28,8 @@
     // Fachpartner (nested list items)
     partnerItem: '.fachpartner-karte-item-wrapper',
 
-    // Sidebar / Scrollcontainer (wir nehmen den ersten Treffer)
+    // Sidebar / Modal / Scrollcontainer (wir nehmen den ersten Treffer)
+    // WICHTIG: hier stehen Wrapper-Kandidaten, aber wir suchen zusätzlich den echten Scroll-Container automatisch.
     sidebar:
       '.search_results_wrapper, .search-results_wrapper, .search_results, .search-results, .aussendienst-karte-list-wrapper, .fachpartner-karte-list-wrapper',
 
@@ -181,26 +181,24 @@
   // ------------------------------------------------------
   //   State
   // ------------------------------------------------------
-  let allGeoData = [];  // alle Partner (Fachpartner)
-  let geoData    = [];  // gefilterte Partner
+  let allGeoData = [];
+  let geoData    = [];
   let cardCount  = 0;
 
-  let lastOpen         = null; // { cardIndex, lng, lat, zoom }
+  let lastOpen         = null;
   let hoveredFeatureId = null;
   let activeFeatureId  = null;
   let hoverFlyTimeout  = null;
 
   let currentQuery    = '';
   let currentRadiusKm = null;
-  let searchCenter    = null; // { lat, lng }
+  let searchCenter    = null;
 
   let isFilteredByPlz = false;
 
-  // DOM maps
   let partnerElByIndex = new Map();
   let aussendienstEls  = [];
 
-  // Finsweet / DOM change guard
   let isApplyingDom = false;
   let rerenderTO = null;
 
@@ -623,24 +621,104 @@
     if (el) el.classList.add('is--active');
   }
 
+  // ---------- SCROLL FIX (Modal-safe) ----------
+  function isElementVisible(el) {
+    if (!el) return false;
+    if (!el.isConnected) return false;
+    const style = getComputedStyle(el);
+    if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
+    // offsetParent ist bei position:fixed manchmal null -> daher nur als Zusatz
+    const rect = el.getBoundingClientRect();
+    return rect.width > 0 && rect.height > 0;
+  }
+
+  function isScrollable(el) {
+    if (!el) return false;
+    const cs = getComputedStyle(el);
+    const oy = cs.overflowY;
+    const ox = cs.overflowX;
+    const canScrollY = (oy === 'auto' || oy === 'scroll' || oy === 'overlay');
+    const canScrollX = (ox === 'auto' || ox === 'scroll' || ox === 'overlay');
+    const hasY = el.scrollHeight > el.clientHeight + 1;
+    const hasX = el.scrollWidth > el.clientWidth + 1;
+    return (canScrollY && hasY) || (canScrollX && hasX);
+  }
+
+  // Sucht vom Card-Element nach oben den ersten wirklich scrollbaren Container.
+  // stopAt = Sidebar-Kandidat (falls vorhanden), damit wir nicht bis body durchlaufen.
+  function findScrollableAncestor(el, stopAt) {
+    let cur = el ? el.parentElement : null;
+    while (cur && cur !== document.body && cur !== document.documentElement) {
+      if (isScrollable(cur)) return cur;
+      if (stopAt && cur === stopAt) break;
+      cur = cur.parentElement;
+    }
+    if (stopAt && isScrollable(stopAt)) return stopAt;
+    return null;
+  }
+
   function getScrollContainerFor(el) {
-    if (!el) return null;
-    return el.closest(SEL.sidebar) || getSidebarEl();
+    const sidebarCandidate = el ? el.closest(SEL.sidebar) : null;
+    const sidebarFallback  = getSidebarEl();
+    const sidebar = sidebarCandidate || sidebarFallback || null;
+
+    // Wichtig: echtes Scroll-Element finden (Modal hat oft inneren Scroller)
+    const scroller = findScrollableAncestor(el, sidebar) || sidebar;
+    return scroller || null;
   }
 
-  function scrollPartnerIntoView(el) {
-    const wrapper = getScrollContainerFor(el);
-    if (!wrapper || !el) return;
+  function scrollPartnerIntoView(el, opts = {}) {
+    const { behavior = 'smooth', align = 'center', retries = 18 } = opts;
+    if (!el) return;
 
-    const wrapperRect = wrapper.getBoundingClientRect();
-    const elRect      = el.getBoundingClientRect();
+    const tryScroll = (n) => {
+      const scroller = getScrollContainerFor(el);
 
-    const isAbove = elRect.top < wrapperRect.top;
-    const isBelow = elRect.bottom > wrapperRect.bottom;
-    if (!isAbove && !isBelow) return;
+      // Wenn Modal / Scroller noch nicht "sichtbar" (Animation), warten und retry
+      if (!scroller || !isElementVisible(scroller) || scroller.clientHeight === 0) {
+        if (n < retries) return setTimeout(() => tryScroll(n + 1), 80);
+        // Fallback
+        try { el.scrollIntoView({ behavior, block: 'nearest' }); } catch (e) {}
+        return;
+      }
 
-    el.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+      // Wenn das Element selbst noch unsichtbar ist (Finsweet rerender), retry
+      if (!isElementVisible(el)) {
+        if (n < retries) return setTimeout(() => tryScroll(n + 1), 80);
+      }
+
+      const sRect = scroller.getBoundingClientRect();
+      const eRect = el.getBoundingClientRect();
+      const currentTop = scroller.scrollTop;
+
+      // Position des Elements relativ zum Scroller-Inhalt:
+      const deltaTop = (eRect.top - sRect.top);
+      const padding = 16;
+
+      let targetTop;
+      if (align === 'top') {
+        targetTop = currentTop + deltaTop - padding;
+      } else if (align === 'bottom') {
+        targetTop = currentTop + deltaTop - (scroller.clientHeight - eRect.height) + padding;
+      } else {
+        // center
+        targetTop = currentTop + deltaTop - (scroller.clientHeight / 2) + (eRect.height / 2);
+      }
+
+      // clamp
+      targetTop = Math.max(0, Math.min(targetTop, scroller.scrollHeight - scroller.clientHeight));
+
+      // Scroll wirklich den Container (nicht window)
+      try {
+        scroller.scrollTo({ top: targetTop, behavior });
+      } catch (e) {
+        scroller.scrollTop = targetTop;
+      }
+    };
+
+    tryScroll(0);
   }
+  // ---------- END SCROLL FIX ----------
 
   function bindLayerEvents() {
     if (layerHandlers.onClusterClick) map.off('click', 'fachpartner-clusters', layerHandlers.onClusterClick);
@@ -700,7 +778,8 @@
       const el = partnerElByIndex.get(cardIndex);
       if (el) {
         highlightPartnerEl(el, true);
-        scrollPartnerIntoView(el);
+        // Hover-Scroll (eher soft)
+        scrollPartnerIntoView(el, { behavior: 'smooth', align: 'center', retries: 6 });
       }
     };
 
@@ -895,7 +974,11 @@
     const el = partnerElByIndex.get(cardIndex);
     if (el) {
       setActivePartnerEl(el);
-      scrollPartnerIntoView(el);
+
+      // ✅ Wichtig: Scroll mehrfach/versetzt (Modal-Animationen + Finsweet Timing)
+      scrollPartnerIntoView(el, { behavior: 'smooth', align: 'center', retries: 18 });
+      setTimeout(() => scrollPartnerIntoView(el, { behavior: 'smooth', align: 'center', retries: 12 }), 120);
+      setTimeout(() => scrollPartnerIntoView(el, { behavior: 'smooth', align: 'center', retries: 8  }), 280);
     }
 
     requestAnimationFrame(() => {
@@ -1017,7 +1100,6 @@
       if (zoomResetBtn) zoomResetBtn.classList.remove('is-active');
     }
 
-    // Kein Query -> alles
     if (!hasQ) {
       geoData = allGeoData.slice();
       applyCardsVisibility(null);
@@ -1034,7 +1116,6 @@
       return;
     }
 
-    // Kein Radius -> Textfilter
     if (!currentRadiusKm) {
       geoData = textMatchesForQuery(q);
 
@@ -1054,11 +1135,9 @@
       return;
     }
 
-    // Radius aktiv -> Center aus Query, Ergebnisse = alle im Radius
     const isNumeric = /^[0-9]+$/.test(currentQuery);
     const shouldGeocode = !(isNumeric && currentQuery.length < 5);
 
-    // Kreis sofort anzeigen (Fallback)
     const immediateFallbackCenter =
       centroidOf(textMatchesForQuery(q)) ||
       searchCenter ||
@@ -1228,7 +1307,7 @@
   }
 
   // ------------------------------------------------------
-  //   (NEU) Klick auf Card -> wenn danach is--active gesetzt ist -> zoom
+  //   Klick auf Card -> wenn danach is--active gesetzt ist -> zoom
   // ------------------------------------------------------
   function setupCardClickActiveZoom() {
     const isInteractiveTarget = (t) => {
@@ -1244,16 +1323,13 @@
         card.dataset._rennergyClickZoom = '1';
 
         card.addEventListener('click', (e) => {
-          // Wenn der User bewusst einen Link/Button klickt: nicht reinfunken
           if (isInteractiveTarget(e.target)) return;
 
           const idxStr = card.dataset.cardIndex;
           const idx    = typeof idxStr === 'string' ? parseInt(idxStr, 10) : NaN;
           if (isNaN(idx)) return;
 
-          // Webflow setzt .is--active oft "nach" dem Click im selben Tick
           setTimeout(() => {
-            // Nur wenn wirklich aktiv (dein Punkt 5)
             if (!card.classList.contains('is--active')) return;
             zoomToCardIndex(idx, 11);
           }, 0);
@@ -1266,8 +1342,7 @@
   }
 
   // ------------------------------------------------------
-  //   (NEU) Observer: wenn irgendwo .is--active auf einem Partner auftaucht -> zoom
-  //   (z.B. wenn aktive Card per anderer Logik gesetzt wird)
+  //   Observer: wenn irgendwo .is--active auf einem Partner auftaucht -> zoom
   // ------------------------------------------------------
   function setupActiveClassObserver() {
     const wrapper = document.querySelector(SEL.aussendienstListWrapper);
@@ -1349,13 +1424,6 @@
   async function rebuildFromDOM(reason) {
     dbg.log('RebuildFromDOM ->', reason || 'manual');
 
-    const adWrapper = document.querySelector(SEL.aussendienstListWrapper);
-    if (!adWrapper) {
-      dbg.log('❌ Kein Außendienst-Wrapper gefunden:', SEL.aussendienstListWrapper);
-    } else {
-      dbg.log('✅ Außendienst-Wrapper gefunden');
-    }
-
     const partnerEls = Array.from(document.querySelectorAll(SEL.partnerItem));
     if (!partnerEls.length) {
       dbg.log('❌ Keine Fachpartner-Items gefunden:', SEL.partnerItem);
@@ -1379,16 +1447,6 @@
       const cardIndex = i;
       item.dataset.cardIndex = String(cardIndex);
 
-      const adEl = item.closest(SEL.aussendienstItem);
-      if (adEl) {
-        if (!adEl.dataset.aussendienstIndex) {
-          adEl.dataset.aussendienstIndex = String(aussendienstEls.indexOf(adEl));
-        }
-        item.dataset.aussendienstIndex = adEl.dataset.aussendienstIndex || '';
-      }
-
-      partnerElByIndex.set(cardIndex, item);
-
       const streetEl = item.querySelector('.fachpartner_street');
       const numEl    = item.querySelector('.fachpartner_number');
       const zipEl    = item.querySelector('.fachpartner_zip');
@@ -1401,6 +1459,8 @@
 
       if (zip)  item.dataset.zip  = zip;
       if (city) item.dataset.city = city;
+
+      partnerElByIndex.set(cardIndex, item);
 
       let lat = item.getAttribute('data-lat');
       let lng = item.getAttribute('data-lng');
@@ -1450,14 +1510,10 @@
     dbg.log('✅ Partner gesammelt:', { partnerDOM: partnerEls.length, geoItems: out.length });
 
     addClusterSourceAndLayers();
-
     setGeoFilterByQuery(currentQuery);
 
     updateResultInfo(currentQuery || null);
     updateNoResultsState();
-
-    if (prevBtn) prevBtn.disabled = (cardCount <= 1);
-    if (nextBtn) nextBtn.disabled = (cardCount <= 1);
 
     if (!currentQuery) fitAllProjects(false);
   }
@@ -1517,38 +1573,6 @@
         resetSearchFieldAndFilter();
       });
     }
-
-    if (prevBtn) {
-      prevBtn.addEventListener('click', () => {
-        if (!geoData.length) return;
-        const visible = geoData.map(x => x.cardIndex);
-        if (!visible.length) return;
-
-        const current = (lastOpen && typeof lastOpen.cardIndex === 'number') ? lastOpen.cardIndex : visible[0];
-        const idx = visible.indexOf(current);
-        const nextIdx = (idx <= 0) ? (visible.length - 1) : (idx - 1);
-        zoomToCardIndex(visible[nextIdx], 10);
-      });
-    }
-
-    if (nextBtn) {
-      nextBtn.addEventListener('click', () => {
-        if (!geoData.length) return;
-        const visible = geoData.map(x => x.cardIndex);
-        if (!visible.length) return;
-
-        const current = (lastOpen && typeof lastOpen.cardIndex === 'number') ? lastOpen.cardIndex : visible[0];
-        const idx = visible.indexOf(current);
-        const nextIdx = (idx === -1 || idx >= visible.length - 1) ? 0 : (idx + 1);
-        zoomToCardIndex(visible[nextIdx], 10);
-      });
-    }
-
-    document.addEventListener('keydown', (e) => {
-      if (!geoData.length || isFilteredByPlz) return;
-      if (e.key === 'ArrowLeft')  { e.preventDefault(); prevBtn?.click(); }
-      if (e.key === 'ArrowRight') { e.preventDefault(); nextBtn?.click(); }
-    });
 
     if (searchForm) {
       searchForm.addEventListener('submit', (e) => {
@@ -1632,16 +1656,12 @@
     const rebindZoomTargets   = setupZoomTargets();
     const rebindHover         = setupCardHoverHighlight();
     const rebindCardClickZoom = setupCardClickActiveZoom();
-
     const rebindFns = [rebindZoomTargets, rebindHover, rebindCardClickZoom];
 
     await waitForStablePartners({ timeoutMs: 24000, stableMs: 900 });
-
     await rebuildFromDOM('initial');
 
-    // (NEU) beobachtet is--active (Punkt 5)
     setupActiveClassObserver();
-
     setupDomObserver(rebindFns);
 
     dbg.log('✅ INIT DONE');
